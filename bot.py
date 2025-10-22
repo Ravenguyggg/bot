@@ -20,10 +20,6 @@ logging.basicConfig(
 
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 
-# Both servers
-TEST_GUILD = discord.Object(id=1087033723347808317)
-SECOND_GUILD = discord.Object(id=1342381217672200274)
-
 # Predefined roles
 AUTHORIZED_ROLE_IDS = [
     1425745494654849024,  # admin 17 pro max
@@ -38,22 +34,15 @@ message_logs = {}
 async def on_ready():
     logging.info(f"Bot is ready! Logged in as {bot.user}")
     try:
-        await bot.tree.sync()
-        synced1 = await bot.tree.sync(guild=TEST_GUILD)
-        synced2 = await bot.tree.sync(guild=SECOND_GUILD)
-        logging.info(f"Synced {len(synced1)} commands to test guild")
-        logging.info(f"Synced {len(synced2)} commands to second guild")
+        # Sync global commands instead of guild-specific
+        synced = await bot.tree.sync()
+        logging.info(f"Synced {len(synced)} global commands")
     except Exception as e:
         logging.error(f"Failed to sync commands: {e}")
+        logging.info("This usually means the bot needs to be re-invited with 'applications.commands' scope")
 
-def multi_guild_command():
-    def decorator(func):
-        bot.tree.command(guild=TEST_GUILD)(func)
-        bot.tree.command(guild=SECOND_GUILD)(func)
-        return func
-    return decorator
-
-@multi_guild_command()
+# Use global commands instead of guild-specific
+@bot.tree.command(name="time", description="Get current time")
 @app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
 async def time(interaction: discord.Interaction):
     """Get current time"""
@@ -63,7 +52,7 @@ async def time(interaction: discord.Interaction):
         ephemeral=True
     )
 
-@multi_guild_command()
+@bot.tree.command(name="user", description="Get user info")
 @app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
 async def user(interaction: discord.Interaction):
     """Get user info"""
@@ -72,7 +61,7 @@ async def user(interaction: discord.Interaction):
         ephemeral=True
     )
 
-@multi_guild_command()
+@bot.tree.command(name="logs", description="View message logs for specific channel")
 @app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
 async def logs(interaction: discord.Interaction, channel: discord.TextChannel = None):
     """View message logs for specific channel"""
@@ -93,7 +82,7 @@ async def logs(interaction: discord.Interaction, channel: discord.TextChannel = 
     
     await interaction.response.send_message(log_text, ephemeral=True)
 
-@multi_guild_command()
+@bot.tree.command(name="start_logging", description="Start logging messages in a channel")
 @app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
 async def start_logging(interaction: discord.Interaction, channel: discord.TextChannel = None):
     """Start logging messages in a channel"""
@@ -112,7 +101,7 @@ async def start_logging(interaction: discord.Interaction, channel: discord.TextC
             ephemeral=True
         )
 
-@multi_guild_command()
+@bot.tree.command(name="stop_logging", description="Stop logging messages in a channel")
 @app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
 async def stop_logging(interaction: discord.Interaction, channel: discord.TextChannel = None):
     """Stop logging messages in a channel"""
