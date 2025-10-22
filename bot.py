@@ -7,6 +7,7 @@ import sys
 import os
 from dotenv import load_dotenv
 import asyncio
+import json
 
 # Load .env file if it exists
 load_dotenv()
@@ -26,15 +27,54 @@ SECOND_GUILD_ID = 1342381217672200274
 TEST_GUILD = discord.Object(id=TEST_GUILD_ID)
 SECOND_GUILD = discord.Object(id=SECOND_GUILD_ID)
 
-# Predefined roles
-AUTHORIZED_ROLE_IDS = [
-    1425745494654849024,  # admin 17 pro max
-    1426211908603871232,  # admin 17
-    1429395961352032266,  # i can ban you
-    765477017646530560    # me
-]
-
 message_logs = {}
+
+# Store authorized users and roles per guild
+authorized_data = {}
+
+def load_authorized_data():
+    """Load authorized users and roles from file"""
+    global authorized_data
+    try:
+        with open('authorized.json', 'r') as f:
+            authorized_data = json.load(f)
+    except FileNotFoundError:
+        authorized_data = {}
+        save_authorized_data()
+
+def save_authorized_data():
+    """Save authorized users and roles to file"""
+    with open('authorized.json', 'w') as f:
+        json.dump(authorized_data, f, indent=2)
+
+def get_guild_data(guild_id):
+    """Get or create guild data"""
+    guild_id = str(guild_id)
+    if guild_id not in authorized_data:
+        authorized_data[guild_id] = {
+            'users': [],
+            'roles': []
+        }
+    return authorized_data[guild_id]
+
+def is_authorized(interaction: discord.Interaction):
+    """Check if user is authorized to use commands"""
+    guild_data = get_guild_data(interaction.guild_id)
+    
+    # Check if user ID is in authorized users
+    if str(interaction.user.id) in guild_data['users']:
+        return True
+    
+    # Check if user has any authorized roles
+    user_role_ids = [str(role.id) for role in interaction.user.roles]
+    if any(role_id in guild_data['roles'] for role_id in user_role_ids):
+        return True
+    
+    # Allow server administrators as fallback
+    if interaction.user.guild_permissions.administrator:
+        return True
+    
+    return False
 
 @bot.event
 async def on_ready():
@@ -43,13 +83,10 @@ async def on_ready():
     
     for guild in bot.guilds:
         logging.info(f" - {guild.name} (ID: {guild.id})")
-        # Check if bot has permissions in this guild
-        permissions = guild.get_member(bot.user.id).guild_permissions
-        if not permissions.manage_guild:
-            logging.warning(f"Bot missing 'Manage Guild' permission in {guild.name}")
-        if not permissions.administrator:
-            logging.warning(f"Bot missing 'Administrator' permission in {guild.name}")
-
+    
+    # Load authorized data
+    load_authorized_data()
+    
     # Sync commands to specific guilds
     await sync_guild_commands(TEST_GUILD, "Test Guild")
     await sync_guild_commands(SECOND_GUILD, "Second Guild")
@@ -73,9 +110,12 @@ def setup_commands():
     """Setup all commands for both guilds"""
     
     @bot.tree.command(name="time", description="Get current time")
-    @app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
     async def time(interaction: discord.Interaction):
         """Get current time"""
+        if not is_authorized(interaction):
+            await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+            return
+            
         current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         await interaction.response.send_message(
             f"{current_time}",
@@ -83,9 +123,12 @@ def setup_commands():
         )
 
     @bot.tree.command(name="user", description="Get user info")
-    @app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
     async def user(interaction: discord.Interaction):
         """Get user info"""
+        if not is_authorized(interaction):
+            await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+            return
+            
         await interaction.response.send_message(
             f"{interaction.user}",
             ephemeral=True
@@ -93,9 +136,12 @@ def setup_commands():
 
     @bot.tree.command(name="logs", description="View message logs for specific channel")
     @app_commands.describe(channel="The channel to view logs from (optional)")
-    @app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
     async def logs(interaction: discord.Interaction, channel: discord.TextChannel = None):
         """View message logs for specific channel"""
+        if not is_authorized(interaction):
+            await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+            return
+            
         if channel is None:
             channel = interaction.channel
         
@@ -115,9 +161,12 @@ def setup_commands():
 
     @bot.tree.command(name="start_logging", description="Start logging messages in a channel")
     @app_commands.describe(channel="The channel to start logging (optional)")
-    @app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
     async def start_logging(interaction: discord.Interaction, channel: discord.TextChannel = None):
         """Start logging messages in a channel"""
+        if not is_authorized(interaction):
+            await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+            return
+            
         if channel is None:
             channel = interaction.channel
         
@@ -135,9 +184,12 @@ def setup_commands():
 
     @bot.tree.command(name="stop_logging", description="Stop logging messages in a channel")
     @app_commands.describe(channel="The channel to stop logging (optional)")
-    @app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
     async def stop_logging(interaction: discord.Interaction, channel: discord.TextChannel = None):
         """Stop logging messages in a channel"""
+        if not is_authorized(interaction):
+            await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+            return
+            
         if channel is None:
             channel = interaction.channel
         
@@ -153,10 +205,149 @@ def setup_commands():
                 ephemeral=True
             )
 
+    # NEW: Authorization management commands
+    @bot.tree.command(name="add_user", description="Add a user to authorized users")
+    @app_commands.describe(user="The user to authorize")
+    async def add_user(interaction: discord.Interaction, user: discord.User):
+        """Add a user to authorized users"""
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("You need administrator permissions to use this command!", ephemeral=True)
+            return
+            
+        guild_data = get_guild_data(interaction.guild_id)
+        user_id = str(user.id)
+        
+        if user_id not in guild_data['users']:
+            guild_data['users'].append(user_id)
+            save_authorized_data()
+            await interaction.response.send_message(
+                f"✅ Added {user.mention} to authorized users!",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ {user.mention} is already authorized!",
+                ephemeral=True
+            )
+
+    @bot.tree.command(name="remove_user", description="Remove a user from authorized users")
+    @app_commands.describe(user="The user to remove")
+    async def remove_user(interaction: discord.Interaction, user: discord.User):
+        """Remove a user from authorized users"""
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("You need administrator permissions to use this command!", ephemeral=True)
+            return
+            
+        guild_data = get_guild_data(interaction.guild_id)
+        user_id = str(user.id)
+        
+        if user_id in guild_data['users']:
+            guild_data['users'].remove(user_id)
+            save_authorized_data()
+            await interaction.response.send_message(
+                f"✅ Removed {user.mention} from authorized users!",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ {user.mention} is not in authorized users!",
+                ephemeral=True
+            )
+
+    @bot.tree.command(name="add_role", description="Add a role to authorized roles")
+    @app_commands.describe(role="The role to authorize")
+    async def add_role(interaction: discord.Interaction, role: discord.Role):
+        """Add a role to authorized roles"""
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("You need administrator permissions to use this command!", ephemeral=True)
+            return
+            
+        guild_data = get_guild_data(interaction.guild_id)
+        role_id = str(role.id)
+        
+        if role_id not in guild_data['roles']:
+            guild_data['roles'].append(role_id)
+            save_authorized_data()
+            await interaction.response.send_message(
+                f"✅ Added {role.mention} to authorized roles!",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ {role.mention} is already authorized!",
+                ephemeral=True
+            )
+
+    @bot.tree.command(name="remove_role", description="Remove a role from authorized roles")
+    @app_commands.describe(role="The role to remove")
+    async def remove_role(interaction: discord.Interaction, role: discord.Role):
+        """Remove a role from authorized roles"""
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("You need administrator permissions to use this command!", ephemeral=True)
+            return
+            
+        guild_data = get_guild_data(interaction.guild_id)
+        role_id = str(role.id)
+        
+        if role_id in guild_data['roles']:
+            guild_data['roles'].remove(role_id)
+            save_authorized_data()
+            await interaction.response.send_message(
+                f"✅ Removed {role.mention} from authorized roles!",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ {role.mention} is not in authorized roles!",
+                ephemeral=True
+            )
+
+    @bot.tree.command(name="list_authorized", description="Show all authorized users and roles")
+    async def list_authorized(interaction: discord.Interaction):
+        """Show all authorized users and roles"""
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("You need administrator permissions to use this command!", ephemeral=True)
+            return
+            
+        guild_data = get_guild_data(interaction.guild_id)
+        
+        embed = discord.Embed(title="Authorized Users & Roles", color=0x00ff00)
+        
+        # Show authorized users
+        if guild_data['users']:
+            users_text = ""
+            for user_id in guild_data['users']:
+                user_obj = interaction.guild.get_member(int(user_id))
+                if user_obj:
+                    users_text += f"{user_obj.mention} (`{user_id}`)\n"
+                else:
+                    users_text += f"Unknown User (`{user_id}`)\n"
+            embed.add_field(name="👥 Authorized Users", value=users_text or "None", inline=False)
+        else:
+            embed.add_field(name="👥 Authorized Users", value="None", inline=False)
+        
+        # Show authorized roles
+        if guild_data['roles']:
+            roles_text = ""
+            for role_id in guild_data['roles']:
+                role_obj = interaction.guild.get_role(int(role_id))
+                if role_obj:
+                    roles_text += f"{role_obj.mention} (`{role_id}`)\n"
+                else:
+                    roles_text += f"Unknown Role (`{role_id}`)\n"
+            embed.add_field(name="🎭 Authorized Roles", value=roles_text or "None", inline=False)
+        else:
+            embed.add_field(name="🎭 Authorized Roles", value="None", inline=False)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     @bot.tree.command(name="sync", description="Manual command sync (admin only)")
-    @app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
     async def sync(interaction: discord.Interaction):
         """Manual command sync"""
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("You need administrator permissions to use this command!", ephemeral=True)
+            return
+            
         await interaction.response.defer(ephemeral=True)
         
         success_count = 0
@@ -196,17 +387,11 @@ async def on_message(message):
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.errors.MissingAnyRole):
-        await interaction.response.send_message(
-            "You don't have permission to use this command!",
-            ephemeral=True
-        )
-    else:
-        logging.error(f"Error: {error}")
-        await interaction.response.send_message(
-            "Something went wrong!",
-            ephemeral=True
-        )
+    logging.error(f"Error: {error}")
+    await interaction.response.send_message(
+        "Something went wrong!",
+        ephemeral=True
+    )
 
 async def main():
     TOKEN = os.getenv('DISCORD_TOKEN')
