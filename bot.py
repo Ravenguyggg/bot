@@ -21,8 +21,10 @@ logging.basicConfig(
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 
 # Both servers
-TEST_GUILD = discord.Object(id=1087033723347808317)
-SECOND_GUILD = discord.Object(id=1342381217672200274)
+TEST_GUILD_ID = 1087033723347808317
+SECOND_GUILD_ID = 1342381217672200274
+TEST_GUILD = discord.Object(id=TEST_GUILD_ID)
+SECOND_GUILD = discord.Object(id=SECOND_GUILD_ID)
 
 # Predefined roles
 AUTHORIZED_ROLE_IDS = [
@@ -37,115 +39,139 @@ message_logs = {}
 @bot.event
 async def on_ready():
     logging.info(f"Bot is ready! Logged in as {bot.user}")
+    logging.info(f"Connected to {len(bot.guilds)} guilds:")
     
-    # Clear any existing commands to avoid conflicts
-    bot.tree.clear_commands(guild=TEST_GUILD)
-    bot.tree.clear_commands(guild=SECOND_GUILD)
-    bot.tree.clear_commands(guild=None)  # Clear global commands
-    
+    for guild in bot.guilds:
+        logging.info(f" - {guild.name} (ID: {guild.id})")
+        # Check if bot has permissions in this guild
+        permissions = guild.get_member(bot.user.id).guild_permissions
+        if not permissions.manage_guild:
+            logging.warning(f"Bot missing 'Manage Guild' permission in {guild.name}")
+        if not permissions.administrator:
+            logging.warning(f"Bot missing 'Administrator' permission in {guild.name}")
+
+    # Sync commands to specific guilds
+    await sync_guild_commands(TEST_GUILD, "Test Guild")
+    await sync_guild_commands(SECOND_GUILD, "Second Guild")
+
+async def sync_guild_commands(guild, guild_name):
+    """Sync commands to a specific guild"""
     try:
-        # Sync commands to both guilds
-        synced1 = await bot.tree.sync(guild=TEST_GUILD)
-        synced2 = await bot.tree.sync(guild=SECOND_GUILD)
-        logging.info(f"Synced {len(synced1)} commands to test guild")
-        logging.info(f"Synced {len(synced2)} commands to second guild")
+        # Copy global commands to guild
+        bot.tree.copy_global_to(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        logging.info(f"✅ Successfully synced {len(synced)} commands to {guild_name}")
+        return True
+    except discord.Forbidden:
+        logging.error(f"❌ Missing permissions to sync commands in {guild_name}. Bot needs 'applications.commands' scope and 'Manage Guild' permission.")
+        return False
     except Exception as e:
-        logging.error(f"Failed to sync commands: {e}")
-        logging.info("Trying global command sync as fallback...")
-        try:
-            synced = await bot.tree.sync()
-            logging.info(f"Synced {len(synced)} global commands as fallback")
-        except Exception as e2:
-            logging.error(f"Global sync also failed: {e2}")
+        logging.error(f"❌ Failed to sync commands to {guild_name}: {e}")
+        return False
 
-def multi_guild_command():
-    def decorator(func):
-        # Register command to both guilds
-        bot.tree.command(name=func.__name__, description=func.__doc__ or "No description", guild=TEST_GUILD)(func)
-        bot.tree.command(name=func.__name__, description=func.__doc__ or "No description", guild=SECOND_GUILD)(func)
-        return func
-    return decorator
-
-@multi_guild_command()
-@app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
-async def time(interaction: discord.Interaction):
-    """Get current time"""
-    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    await interaction.response.send_message(
-        f"{current_time}",
-        ephemeral=True
-    )
-
-@multi_guild_command()
-@app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
-async def user(interaction: discord.Interaction):
-    """Get user info"""
-    await interaction.response.send_message(
-        f"{interaction.user}",
-        ephemeral=True
-    )
-
-@multi_guild_command()
-@app_commands.describe(channel="The channel to view logs from (optional)")
-@app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
-async def logs(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    """View message logs for specific channel"""
-    if channel is None:
-        channel = interaction.channel
+def setup_commands():
+    """Setup all commands for both guilds"""
     
-    if channel.id not in message_logs or not message_logs[channel.id]:
+    @bot.tree.command(name="time", description="Get current time")
+    @app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
+    async def time(interaction: discord.Interaction):
+        """Get current time"""
+        current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         await interaction.response.send_message(
-            f"No messages logged for {channel.mention}!", 
-            ephemeral=True
-        )
-        return
-    
-    log_text = f"**Recent Messages in {channel.mention}:**\n\n"
-    for log in reversed(message_logs[channel.id][-10:]):
-        log_text += f"**{log['author']}** at {log['timestamp']}\n"
-        log_text += f"{log['content']}\n\n"
-    
-    await interaction.response.send_message(log_text, ephemeral=True)
-
-@multi_guild_command()
-@app_commands.describe(channel="The channel to start logging (optional)")
-@app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
-async def start_logging(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    """Start logging messages in a channel"""
-    if channel is None:
-        channel = interaction.channel
-    
-    if channel.id not in message_logs:
-        message_logs[channel.id] = []
-        await interaction.response.send_message(
-            f"Started logging messages in {channel.mention}",
-            ephemeral=True
-        )
-    else:
-        await interaction.response.send_message(
-            f"Already logging messages in {channel.mention}",
+            f"{current_time}",
             ephemeral=True
         )
 
-@multi_guild_command()
-@app_commands.describe(channel="The channel to stop logging (optional)")
-@app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
-async def stop_logging(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    """Stop logging messages in a channel"""
-    if channel is None:
-        channel = interaction.channel
-    
-    if channel.id in message_logs:
-        del message_logs[channel.id]
+    @bot.tree.command(name="user", description="Get user info")
+    @app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
+    async def user(interaction: discord.Interaction):
+        """Get user info"""
         await interaction.response.send_message(
-            f"Stopped logging messages in {channel.mention}",
+            f"{interaction.user}",
             ephemeral=True
         )
-    else:
-        await interaction.response.send_message(
-            f"Not logging messages in {channel.mention}",
+
+    @bot.tree.command(name="logs", description="View message logs for specific channel")
+    @app_commands.describe(channel="The channel to view logs from (optional)")
+    @app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
+    async def logs(interaction: discord.Interaction, channel: discord.TextChannel = None):
+        """View message logs for specific channel"""
+        if channel is None:
+            channel = interaction.channel
+        
+        if channel.id not in message_logs or not message_logs[channel.id]:
+            await interaction.response.send_message(
+                f"No messages logged for {channel.mention}!", 
+                ephemeral=True
+            )
+            return
+        
+        log_text = f"**Recent Messages in {channel.mention}:**\n\n"
+        for log in reversed(message_logs[channel.id][-10:]):
+            log_text += f"**{log['author']}** at {log['timestamp']}\n"
+            log_text += f"{log['content']}\n\n"
+        
+        await interaction.response.send_message(log_text, ephemeral=True)
+
+    @bot.tree.command(name="start_logging", description="Start logging messages in a channel")
+    @app_commands.describe(channel="The channel to start logging (optional)")
+    @app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
+    async def start_logging(interaction: discord.Interaction, channel: discord.TextChannel = None):
+        """Start logging messages in a channel"""
+        if channel is None:
+            channel = interaction.channel
+        
+        if channel.id not in message_logs:
+            message_logs[channel.id] = []
+            await interaction.response.send_message(
+                f"Started logging messages in {channel.mention}",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"Already logging messages in {channel.mention}",
+                ephemeral=True
+            )
+
+    @bot.tree.command(name="stop_logging", description="Stop logging messages in a channel")
+    @app_commands.describe(channel="The channel to stop logging (optional)")
+    @app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
+    async def stop_logging(interaction: discord.Interaction, channel: discord.TextChannel = None):
+        """Stop logging messages in a channel"""
+        if channel is None:
+            channel = interaction.channel
+        
+        if channel.id in message_logs:
+            del message_logs[channel.id]
+            await interaction.response.send_message(
+                f"Stopped logging messages in {channel.mention}",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"Not logging messages in {channel.mention}",
+                ephemeral=True
+            )
+
+    @bot.tree.command(name="sync", description="Manual command sync (admin only)")
+    @app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
+    async def sync(interaction: discord.Interaction):
+        """Manual command sync"""
+        await interaction.response.defer(ephemeral=True)
+        
+        success_count = 0
+        if await sync_guild_commands(TEST_GUILD, "Test Guild"):
+            success_count += 1
+        if await sync_guild_commands(SECOND_GUILD, "Second Guild"):
+            success_count += 1
+            
+        await interaction.followup.send(
+            f"Command sync completed! {success_count}/2 guilds synced successfully.",
             ephemeral=True
         )
+
+# Setup all commands
+setup_commands()
 
 @bot.event
 async def on_message(message):
@@ -173,11 +199,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     if isinstance(error, app_commands.errors.MissingAnyRole):
         await interaction.response.send_message(
             "You don't have permission to use this command!",
-            ephemeral=True
-        )
-    elif isinstance(error, app_commands.errors.CommandNotFound):
-        await interaction.response.send_message(
-            "Command not found. The bot may be restarting. Please try again in a moment.",
             ephemeral=True
         )
     else:
