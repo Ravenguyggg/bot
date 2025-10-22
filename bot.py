@@ -8,6 +8,7 @@ import os
 from dotenv import load_dotenv
 import asyncio
 import json
+import threading
 
 # Load .env file if it exists
 load_dotenv()
@@ -24,16 +25,17 @@ bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 # Both servers
 TEST_GUILD_ID = 1087033723347808317
 SECOND_GUILD_ID = 1342381217672200274
-TEST_GUILD = discord.Object(id=TEST_GUILD_ID)
-SECOND_GUILD = discord.Object(id=SECOND_GUILD_ID)
 
 # Store message logs and authorized data
 message_logs = {}
 authorized_data = {}
+auto_ban_config = {}
 
-def load_authorized_data():
-    """Load authorized users and roles from file"""
-    global authorized_data
+def load_data():
+    """Load authorized users, roles, and auto-ban config from files"""
+    global authorized_data, auto_ban_config
+    
+    # Load authorized data
     try:
         with open('authorized.json', 'r') as f:
             authorized_data = json.load(f)
@@ -42,15 +44,38 @@ def load_authorized_data():
         authorized_data = {}
         logging.info("ℹ️ No authorized data file found, starting fresh")
         save_authorized_data()
+    
+    # Load auto-ban config
+    try:
+        with open('auto_ban_config.json', 'r') as f:
+            auto_ban_config = json.load(f)
+        logging.info("✅ Loaded auto-ban config from file")
+    except FileNotFoundError:
+        auto_ban_config = {
+            'enabled': False,  # Disabled by default for safety
+            'ban_message': "🚫 You have been automatically banned for posting prohibited content.",
+            'log_channel': None,
+            'banned_content': ['image', 'gif', 'video', 'file'],
+            'exempt_roles': [],
+            'exempt_channels': []
+        }
+        save_auto_ban_config()
 
 def save_authorized_data():
     """Save authorized users and roles to file"""
     try:
         with open('authorized.json', 'w') as f:
             json.dump(authorized_data, f, indent=2)
-        logging.info("💾 Saved authorized data to file")
     except Exception as e:
         logging.error(f"❌ Failed to save authorized data: {e}")
+
+def save_auto_ban_config():
+    """Save auto-ban configuration to file"""
+    try:
+        with open('auto_ban_config.json', 'w') as f:
+            json.dump(auto_ban_config, f, indent=2)
+    except Exception as e:
+        logging.error(f"❌ Failed to save auto-ban config: {e}")
 
 def get_guild_data(guild_id):
     """Get or create guild data"""
@@ -64,6 +89,10 @@ def get_guild_data(guild_id):
 
 def is_authorized(interaction: discord.Interaction):
     """Check if user is authorized to use commands"""
+    # Allow everyone for now to test
+    if interaction.user.guild_permissions.administrator:
+        return True
+    
     guild_data = get_guild_data(interaction.guild_id)
     
     # Check if user ID is in authorized users
@@ -75,376 +104,349 @@ def is_authorized(interaction: discord.Interaction):
     if any(role_id in guild_data['roles'] for role_id in user_role_ids):
         return True
     
-    # Allow server administrators as fallback
-    if interaction.user.guild_permissions.administrator:
-        return True
-    
     return False
+
+async def log_auto_ban_action(guild: discord.Guild, user: discord.Member, content_type: str, message: discord.Message):
+    """Log auto-ban actions to the designated log channel"""
+    if not auto_ban_config.get('log_channel'):
+        return
+    
+    try:
+        log_channel = guild.get_channel(auto_ban_config['log_channel'])
+        if log_channel:
+            embed = discord.Embed(
+                title="🚨 Auto-Ban Executed",
+                color=0xff0000,
+                timestamp=datetime.datetime.now()
+            )
+            embed.add_field(name="User", value=f"{user.mention} ({user.id})", inline=True)
+            embed.add_field(name="Content Type", value=content_type, inline=True)
+            embed.add_field(name="Channel", value=message.channel.mention, inline=True)
+            
+            if message.content:
+                embed.add_field(name="Message", value=message.content[:500] + "..." if len(message.content) > 500 else message.content, inline=False)
+            
+            embed.add_field(name="Attachments", value=f"{len(message.attachments)} files", inline=True)
+            
+            await log_channel.send(embed=embed)
+    except Exception as e:
+        logging.error(f"Failed to log auto-ban action: {e}")
+
+async def auto_ban_user(message: discord.Message, content_type: str):
+    """Automatically ban user for posting prohibited content"""
+    if not auto_ban_config.get('enabled', False):
+        return
+    
+    user = message.author
+    guild = message.guild
+    
+    # Check if user is exempt (has exempt roles)
+    user_role_ids = [str(role.id) for role in user.roles]
+    if any(role_id in auto_ban_config.get('exempt_roles', []) for role_id in user_role_ids):
+        return
+    
+    # Check if channel is exempt
+    if str(message.channel.id) in auto_ban_config.get('exempt_channels', []):
+        return
+    
+    # Check if user is admin or bot
+    if user.guild_permissions.administrator or user.bot:
+        return
+    
+    try:
+        # Try to send DM first
+        ban_message = auto_ban_config.get('ban_message', "🚫 You have been automatically banned for posting prohibited content.")
+        try:
+            await user.send(f"{ban_message}\n**Server:** {guild.name}\n**Reason:** Posted {content_type}")
+        except:
+            pass  # Can't DM user, continue with ban
+        
+        # Ban from server
+        await guild.ban(user, reason=f"Auto-ban: Posted {content_type}")
+        
+        # Log the action
+        await log_auto_ban_action(guild, user, content_type, message)
+        
+        logging.info(f"🚨 Auto-banned user {user} ({user.id}) for posting {content_type} in {guild.name}")
+        
+    except discord.Forbidden:
+        logging.error(f"❌ Missing permissions to ban user {user} in {guild.name}")
+    except Exception as e:
+        logging.error(f"❌ Failed to auto-ban user {user}: {e}")
 
 @bot.event
 async def on_ready():
-    logging.info(f"Bot is ready! Logged in as {bot.user}")
-    logging.info(f"Connected to {len(bot.guilds)} guilds:")
+    logging.info(f"🤖 Bot is ready! Logged in as {bot.user}")
+    logging.info(f"📊 Connected to {len(bot.guilds)} guilds:")
     
     for guild in bot.guilds:
         logging.info(f" - {guild.name} (ID: {guild.id})")
     
-    # Load authorized data
-    load_authorized_data()
+    # Load data
+    load_data()
     
-    # Sync commands to specific guilds
-    await sync_guild_commands(TEST_GUILD, "Test Guild")
-    await sync_guild_commands(SECOND_GUILD, "Second Guild")
-
-async def sync_guild_commands(guild, guild_name):
-    """Sync commands to a specific guild"""
+    # Use global commands instead of guild-specific to avoid permission issues
     try:
-        # Copy global commands to guild
-        bot.tree.copy_global_to(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
-        logging.info(f"✅ Successfully synced {len(synced)} commands to {guild_name}")
-        return True
-    except discord.Forbidden:
-        logging.error(f"❌ Missing permissions to sync commands in {guild_name}. Bot needs 'applications.commands' scope and 'Manage Guild' permission.")
-        return False
+        synced = await bot.tree.sync()
+        logging.info(f"✅ Successfully synced {len(synced)} global commands")
     except Exception as e:
-        logging.error(f"❌ Failed to sync commands to {guild_name}: {e}")
-        return False
+        logging.error(f"❌ Failed to sync commands: {e}")
 
-def setup_commands():
-    """Setup all commands for both guilds"""
+# Global commands - work in all servers
+@bot.tree.command(name="time", description="Get current time")
+async def time(interaction: discord.Interaction):
+    """Get current time"""
+    if not is_authorized(interaction):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+        
+    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    await interaction.response.send_message(f"🕒 {current_time}", ephemeral=True)
+
+@bot.tree.command(name="user", description="Get user info")
+async def user(interaction: discord.Interaction):
+    """Get user info"""
+    if not is_authorized(interaction):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+        
+    await interaction.response.send_message(
+        f"👤 **User Info:**\n"
+        f"Name: {interaction.user.display_name}\n"
+        f"ID: {interaction.user.id}\n"
+        f"Joined: {interaction.user.joined_at}",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="logs", description="View message logs for specific channel")
+@app_commands.describe(channel="The channel to view logs from (optional)")
+async def logs(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    """View message logs for specific channel"""
+    if not is_authorized(interaction):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+        
+    if channel is None:
+        channel = interaction.channel
     
-    @bot.tree.command(name="time", description="Get current time")
-    async def time(interaction: discord.Interaction):
-        """Get current time"""
-        if not is_authorized(interaction):
-            await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
-            return
-            
-        current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if channel.id not in message_logs or not message_logs[channel.id]:
         await interaction.response.send_message(
-            f"{current_time}",
+            f"📭 No messages logged for {channel.mention}!\n"
+            f"Use `/start_logging` first to begin logging this channel.",
             ephemeral=True
         )
+        return
+    
+    log_text = f"**📝 Recent Messages in {channel.mention}:**\n\n"
+    for log in reversed(message_logs[channel.id][-10:]):
+        log_text += f"**{log['author']}** at {log['timestamp']}\n"
+        log_text += f"{log['content']}\n\n"
+    
+    await interaction.response.send_message(log_text, ephemeral=True)
 
-    @bot.tree.command(name="user", description="Get user info")
-    async def user(interaction: discord.Interaction):
-        """Get user info"""
-        if not is_authorized(interaction):
-            await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
-            return
-            
+@bot.tree.command(name="start_logging", description="Start logging messages in a channel")
+@app_commands.describe(channel="The channel to start logging (optional)")
+async def start_logging(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    """Start logging messages in a channel"""
+    if not is_authorized(interaction):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+        
+    if channel is None:
+        channel = interaction.channel
+    
+    if channel.id not in message_logs:
+        message_logs[channel.id] = []
         await interaction.response.send_message(
-            f"User: {interaction.user.display_name}\n"
-            f"ID: {interaction.user.id}\n"
-            f"Joined: {interaction.user.joined_at}",
+            f"✅ Started logging messages in {channel.mention}!\n"
+            f"Now monitoring all messages in this channel.",
+            ephemeral=True
+        )
+        logging.info(f"Started logging channel: {channel.name} (ID: {channel.id})")
+    else:
+        await interaction.response.send_message(
+            f"ℹ️ Already logging messages in {channel.mention}",
             ephemeral=True
         )
 
-    @bot.tree.command(name="logs", description="View message logs for specific channel")
-    @app_commands.describe(channel="The channel to view logs from (optional)")
-    async def logs(interaction: discord.Interaction, channel: discord.TextChannel = None):
-        """View message logs for specific channel"""
-        if not is_authorized(interaction):
-            await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
-            return
-            
-        if channel is None:
-            channel = interaction.channel
+@bot.tree.command(name="stop_logging", description="Stop logging messages in a channel")
+@app_commands.describe(channel="The channel to stop logging (optional)")
+async def stop_logging(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    """Stop logging messages in a channel"""
+    if not is_authorized(interaction):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
         
-        # Debug info
-        logging.info(f"Checking logs for channel {channel.name} (ID: {channel.id})")
-        logging.info(f"Available logged channels: {list(message_logs.keys())}")
-        
-        if channel.id not in message_logs or not message_logs[channel.id]:
-            await interaction.response.send_message(
-                f"No messages logged for {channel.mention}!\n"
-                f"Use `/start_logging` first to begin logging this channel.",
-                ephemeral=True
-            )
-            return
-        
-        log_text = f"**Recent Messages in {channel.mention}:**\n\n"
-        for log in reversed(message_logs[channel.id][-10:]):
-            log_text += f"**{log['author']}** at {log['timestamp']}\n"
-            log_text += f"{log['content']}\n\n"
-        
-        await interaction.response.send_message(log_text, ephemeral=True)
-
-    @bot.tree.command(name="start_logging", description="Start logging messages in a channel")
-    @app_commands.describe(channel="The channel to start logging (optional)")
-    async def start_logging(interaction: discord.Interaction, channel: discord.TextChannel = None):
-        """Start logging messages in a channel"""
-        if not is_authorized(interaction):
-            await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
-            return
-            
-        if channel is None:
-            channel = interaction.channel
-        
-        if channel.id not in message_logs:
-            message_logs[channel.id] = []
-            await interaction.response.send_message(
-                f"✅ Started logging messages in {channel.mention}!\n"
-                f"Now monitoring all messages in this channel.",
-                ephemeral=True
-            )
-            logging.info(f"Started logging channel: {channel.name} (ID: {channel.id})")
-        else:
-            await interaction.response.send_message(
-                f"ℹ️ Already logging messages in {channel.mention}",
-                ephemeral=True
-            )
-
-    @bot.tree.command(name="stop_logging", description="Stop logging messages in a channel")
-    @app_commands.describe(channel="The channel to stop logging (optional)")
-    async def stop_logging(interaction: discord.Interaction, channel: discord.TextChannel = None):
-        """Stop logging messages in a channel"""
-        if not is_authorized(interaction):
-            await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
-            return
-            
-        if channel is None:
-            channel = interaction.channel
-        
-        if channel.id in message_logs:
-            message_count = len(message_logs[channel.id])
-            del message_logs[channel.id]
-            await interaction.response.send_message(
-                f"✅ Stopped logging messages in {channel.mention}\n"
-                f"Removed {message_count} logged messages.",
-                ephemeral=True
-            )
-            logging.info(f"Stopped logging channel: {channel.name} (ID: {channel.id})")
-        else:
-            await interaction.response.send_message(
-                f"ℹ️ Not currently logging messages in {channel.mention}",
-                ephemeral=True
-            )
-
-    @bot.tree.command(name="logging_status", description="Check which channels are being logged")
-    async def logging_status(interaction: discord.Interaction):
-        """Check logging status for all channels"""
-        if not is_authorized(interaction):
-            await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
-            return
-        
-        if not message_logs:
-            await interaction.response.send_message(
-                "No channels are currently being logged.\n"
-                "Use `/start_logging` in a channel to begin.",
-                ephemeral=True
-            )
-            return
-        
-        status_text = "**Currently Logging Channels:**\n\n"
-        for channel_id, logs in message_logs.items():
-            channel = interaction.guild.get_channel(channel_id)
-            if channel:
-                status_text += f"📝 {channel.mention} - {len(logs)} messages logged\n"
-            else:
-                status_text += f"❓ Unknown Channel (ID: {channel_id}) - {len(logs)} messages\n"
-        
-        await interaction.response.send_message(status_text, ephemeral=True)
-
-    # Authorization management commands
-    @bot.tree.command(name="add_user", description="Add a user to authorized users")
-    @app_commands.describe(user="The user to authorize")
-    async def add_user(interaction: discord.Interaction, user: discord.User):
-        """Add a user to authorized users"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("You need administrator permissions to use this command!", ephemeral=True)
-            return
-            
-        guild_data = get_guild_data(interaction.guild_id)
-        user_id = str(user.id)
-        
-        if user_id not in guild_data['users']:
-            guild_data['users'].append(user_id)
-            save_authorized_data()
-            await interaction.response.send_message(
-                f"✅ Added {user.mention} to authorized users!",
-                ephemeral=True
-            )
-        else:
-            await interaction.response.send_message(
-                f"❌ {user.mention} is already authorized!",
-                ephemeral=True
-            )
-
-    @bot.tree.command(name="remove_user", description="Remove a user from authorized users")
-    @app_commands.describe(user="The user to remove")
-    async def remove_user(interaction: discord.Interaction, user: discord.User):
-        """Remove a user from authorized users"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("You need administrator permissions to use this command!", ephemeral=True)
-            return
-            
-        guild_data = get_guild_data(interaction.guild_id)
-        user_id = str(user.id)
-        
-        if user_id in guild_data['users']:
-            guild_data['users'].remove(user_id)
-            save_authorized_data()
-            await interaction.response.send_message(
-                f"✅ Removed {user.mention} from authorized users!",
-                ephemeral=True
-            )
-        else:
-            await interaction.response.send_message(
-                f"❌ {user.mention} is not in authorized users!",
-                ephemeral=True
-            )
-
-    @bot.tree.command(name="add_role", description="Add a role to authorized roles")
-    @app_commands.describe(role="The role to authorize")
-    async def add_role(interaction: discord.Interaction, role: discord.Role):
-        """Add a role to authorized roles"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("You need administrator permissions to use this command!", ephemeral=True)
-            return
-            
-        guild_data = get_guild_data(interaction.guild_id)
-        role_id = str(role.id)
-        
-        if role_id not in guild_data['roles']:
-            guild_data['roles'].append(role_id)
-            save_authorized_data()
-            await interaction.response.send_message(
-                f"✅ Added {role.mention} to authorized roles!",
-                ephemeral=True
-            )
-        else:
-            await interaction.response.send_message(
-                f"❌ {role.mention} is already authorized!",
-                ephemeral=True
-            )
-
-    @bot.tree.command(name="remove_role", description="Remove a role from authorized roles")
-    @app_commands.describe(role="The role to remove")
-    async def remove_role(interaction: discord.Interaction, role: discord.Role):
-        """Remove a role from authorized roles"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("You need administrator permissions to use this command!", ephemeral=True)
-            return
-            
-        guild_data = get_guild_data(interaction.guild_id)
-        role_id = str(role.id)
-        
-        if role_id in guild_data['roles']:
-            guild_data['roles'].remove(role_id)
-            save_authorized_data()
-            await interaction.response.send_message(
-                f"✅ Removed {role.mention} from authorized roles!",
-                ephemeral=True
-            )
-        else:
-            await interaction.response.send_message(
-                f"❌ {role.mention} is not in authorized roles!",
-                ephemeral=True
-            )
-
-    @bot.tree.command(name="list_authorized", description="Show all authorized users and roles")
-    async def list_authorized(interaction: discord.Interaction):
-        """Show all authorized users and roles"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("You need administrator permissions to use this command!", ephemeral=True)
-            return
-            
-        guild_data = get_guild_data(interaction.guild_id)
-        
-        embed = discord.Embed(title="Authorized Users & Roles", color=0x00ff00)
-        
-        # Show authorized users
-        if guild_data['users']:
-            users_text = ""
-            for user_id in guild_data['users']:
-                user_obj = interaction.guild.get_member(int(user_id))
-                if user_obj:
-                    users_text += f"{user_obj.mention} (`{user_id}`)\n"
-                else:
-                    users_text += f"Unknown User (`{user_id}`)\n"
-            embed.add_field(name="👥 Authorized Users", value=users_text or "None", inline=False)
-        else:
-            embed.add_field(name="👥 Authorized Users", value="None", inline=False)
-        
-        # Show authorized roles
-        if guild_data['roles']:
-            roles_text = ""
-            for role_id in guild_data['roles']:
-                role_obj = interaction.guild.get_role(int(role_id))
-                if role_obj:
-                    roles_text += f"{role_obj.mention} (`{role_id}`)\n"
-                else:
-                    roles_text += f"Unknown Role (`{role_id}`)\n"
-            embed.add_field(name="🎭 Authorized Roles", value=roles_text or "None", inline=False)
-        else:
-            embed.add_field(name="🎭 Authorized Roles", value="None", inline=False)
-        
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @bot.tree.command(name="sync", description="Manual command sync (admin only)")
-    async def sync(interaction: discord.Interaction):
-        """Manual command sync"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("You need administrator permissions to use this command!", ephemeral=True)
-            return
-            
-        await interaction.response.defer(ephemeral=True)
-        
-        success_count = 0
-        if await sync_guild_commands(TEST_GUILD, "Test Guild"):
-            success_count += 1
-        if await sync_guild_commands(SECOND_GUILD, "Second Guild"):
-            success_count += 1
-            
-        await interaction.followup.send(
-            f"Command sync completed! {success_count}/2 guilds synced successfully.",
+    if channel is None:
+        channel = interaction.channel
+    
+    if channel.id in message_logs:
+        message_count = len(message_logs[channel.id])
+        del message_logs[channel.id]
+        await interaction.response.send_message(
+            f"✅ Stopped logging messages in {channel.mention}\n"
+            f"Removed {message_count} logged messages.",
+            ephemeral=True
+        )
+        logging.info(f"Stopped logging channel: {channel.name} (ID: {channel.id})")
+    else:
+        await interaction.response.send_message(
+            f"ℹ️ Not currently logging messages in {channel.mention}",
             ephemeral=True
         )
 
-# Setup all commands
-setup_commands()
+@bot.tree.command(name="logging_status", description="Check which channels are being logged")
+async def logging_status(interaction: discord.Interaction):
+    """Check logging status for all channels"""
+    if not is_authorized(interaction):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+    
+    if not message_logs:
+        await interaction.response.send_message(
+            "📭 No channels are currently being logged.\n"
+            "Use `/start_logging` in a channel to begin.",
+            ephemeral=True
+        )
+        return
+    
+    status_text = "**📊 Currently Logging Channels:**\n\n"
+    for channel_id, logs in message_logs.items():
+        channel = interaction.guild.get_channel(channel_id)
+        if channel:
+            status_text += f"📝 {channel.mention} - {len(logs)} messages logged\n"
+        else:
+            status_text += f"❓ Unknown Channel (ID: {channel_id}) - {len(logs)} messages\n"
+    
+    await interaction.response.send_message(status_text, ephemeral=True)
+
+# Auto-ban commands
+@bot.tree.command(name="auto_ban_status", description="Check auto-ban configuration")
+async def auto_ban_status(interaction: discord.Interaction):
+    """Check auto-ban configuration"""
+    if not is_authorized(interaction):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+    
+    embed = discord.Embed(title="🛡️ Auto-Ban Configuration", color=0x00ff00)
+    
+    status = "✅ **ENABLED**" if auto_ban_config.get('enabled', False) else "❌ **DISABLED**"
+    embed.add_field(name="Status", value=status, inline=False)
+    
+    content_types = ", ".join([f"`{ct}`" for ct in auto_ban_config.get('banned_content', [])])
+    embed.add_field(name="Banned Content", value=content_types or "None", inline=False)
+    
+    log_channel_id = auto_ban_config.get('log_channel')
+    if log_channel_id:
+        log_channel = interaction.guild.get_channel(log_channel_id)
+        embed.add_field(name="Log Channel", value=log_channel.mention if log_channel else f"Unknown ({log_channel_id})", inline=True)
+    else:
+        embed.add_field(name="Log Channel", value="Not set", inline=True)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="auto_ban_enable", description="Enable auto-ban system")
+async def auto_ban_enable(interaction: discord.Interaction):
+    """Enable auto-ban system"""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ You need administrator permissions to use this command!", ephemeral=True)
+        return
+    
+    auto_ban_config['enabled'] = True
+    save_auto_ban_config()
+    await interaction.response.send_message("✅ Auto-ban system **ENABLED**\n⚠️ Be careful - this will automatically ban users!", ephemeral=True)
+
+@bot.tree.command(name="auto_ban_disable", description="Disable auto-ban system")
+async def auto_ban_disable(interaction: discord.Interaction):
+    """Disable auto-ban system"""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ You need administrator permissions to use this command!", ephemeral=True)
+        return
+    
+    auto_ban_config['enabled'] = False
+    save_auto_ban_config()
+    await interaction.response.send_message("❌ Auto-ban system **DISABLED**", ephemeral=True)
+
+@bot.tree.command(name="set_log_channel", description="Set channel for auto-ban logs")
+@app_commands.describe(channel="The channel to send auto-ban logs to")
+async def set_log_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    """Set channel for auto-ban logs"""
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ You need administrator permissions to use this command!", ephemeral=True)
+        return
+    
+    auto_ban_config['log_channel'] = channel.id
+    save_auto_ban_config()
+    await interaction.response.send_message(f"✅ Auto-ban logs will be sent to {channel.mention}", ephemeral=True)
 
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
         return
 
-    # Only log if channel is being monitored
+    # Auto-ban detection
+    if auto_ban_config.get('enabled', False):
+        content_detected = []
+        
+        # Check for images, GIFs, videos, files
+        for attachment in message.attachments:
+            lower_name = attachment.filename.lower()
+            if any(ext in lower_name for ext in ['.png', '.jpg', '.jpeg', '.bmp', '.webp']):
+                content_detected.append('image')
+            elif '.gif' in lower_name:
+                content_detected.append('gif')
+            elif any(ext in lower_name for ext in ['.mp4', '.mov', '.avi', '.mkv', '.webm']):
+                content_detected.append('video')
+            elif any(ext in lower_name for ext in ['.exe', '.bat', '.cmd', '.msi']):
+                content_detected.append('executable')
+            else:
+                content_detected.append('file')
+        
+        # Auto-ban for detected content
+        banned_types = auto_ban_config.get('banned_content', ['image', 'gif', 'video', 'file'])
+        for content_type in content_detected:
+            if content_type in banned_types:
+                await auto_ban_user(message, content_type)
+                break
+
+    # Message logging
     if message.channel.id in message_logs:
         log_entry = {
             'author': str(message.author),
             'content': message.content,
-            'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'attachments': len(message.attachments)
         }
         
         message_logs[message.channel.id].append(log_entry)
-        # Keep only last 100 messages per channel
         if len(message_logs[message.channel.id]) > 100:
             message_logs[message.channel.id].pop(0)
         
-        logging.info(f"[{message.channel.name}] [{log_entry['timestamp']}] {log_entry['author']}: {log_entry['content']}")
+        logging.info(f"[{message.channel.name}] {log_entry['author']}: {log_entry['content']} [Files: {log_entry['attachments']}]")
     
     await bot.process_commands(message)
 
-@bot.tree.error
-async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    logging.error(f"Command error: {error}")
-    await interaction.response.send_message(
-        "Something went wrong!",
-        ephemeral=True
-    )
-
-async def main():
+def run_bot():
+    """Run the Discord bot"""
     TOKEN = os.getenv('DISCORD_TOKEN')
     if not TOKEN:
-        raise ValueError("No Discord token found!")
+        logging.error("❌ No Discord token found!")
+        return
     
     try:
-        await bot.start(TOKEN)
+        asyncio.run(bot.start(TOKEN))
     except Exception as e:
-        logging.error(f"Error starting bot: {e}")
+        logging.error(f"❌ Error starting bot: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Start the bot in a separate thread
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    logging.info("🤖 Discord bot started in background thread")
+    
+    # Keep the main thread alive
+    try:
+        while True:
+            pass
+    except KeyboardInterrupt:
+        logging.info("👋 Shutting down...")
