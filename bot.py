@@ -7,8 +7,6 @@ import sys
 import os
 from dotenv import load_dotenv
 import asyncio
-import threading
-from flask import Flask
 
 # Load .env file if it exists
 load_dotenv()
@@ -19,20 +17,6 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-
-# Create Flask app for health checks
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Discord Bot is running!"
-
-@app.route('/health')
-def health():
-    return "OK", 200
-
-def run_flask():
-    app.run(host='0.0.0.0', port=5000)
 
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 
@@ -182,7 +166,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             ephemeral=True
         )
 
-async def run_bot():
+async def main():
     TOKEN = os.getenv('DISCORD_TOKEN')
     if not TOKEN:
         raise ValueError("No Discord token found!")
@@ -192,13 +176,5 @@ async def run_bot():
     except Exception as e:
         logging.error(f"Error starting bot: {e}")
 
-def run_discord_bot():
-    asyncio.run(run_bot())
-
 if __name__ == "__main__":
-    # Start Flask server in a separate thread
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
-    # Run Discord bot in main thread
-    run_discord_bot()
+    asyncio.run(main())
