@@ -58,7 +58,7 @@ async def time(interaction: discord.Interaction):
     """Get current time"""
     current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     await interaction.response.send_message(
-        f"{current_time}",
+        f"Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): {current_time}",
         ephemeral=True
     )
 
@@ -67,7 +67,7 @@ async def time(interaction: discord.Interaction):
 async def user(interaction: discord.Interaction):
     """Get user info"""
     await interaction.response.send_message(
-        f"{interaction.user}",
+        f"Current User's Login: {interaction.user}",
         ephemeral=True
     )
 
@@ -138,7 +138,7 @@ async def on_message(message):
     # Only log if channel is being monitored
     if message.channel.id in message_logs:
         log_entry = {
-            'author': str(message.author),  # Changed to str() to match v19 format
+            'author': str(message.author),
             'content': message.content,
             'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
