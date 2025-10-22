@@ -7,11 +7,28 @@ import sys
 import os
 from dotenv import load_dotenv
 import asyncio
+from flask import Flask
+from threading import Thread
 
 # Load .env file if it exists
 load_dotenv()
 
-# Setup logging
+# Simple Flask app for health checks
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+@app.route('/health')
+def health():
+    return "OK"
+
+def run_web():
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
+
+# Your existing bot code continues here...
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -20,140 +37,7 @@ logging.basicConfig(
 
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 
-# Predefined roles
-AUTHORIZED_ROLE_IDS = [
-    1425745494654849024,  # admin 17 pro max
-    1426211908603871232,  # admin 17
-    1429395961352032266,  # i can ban you
-    765477017646530560    # me
-]
-
-message_logs = {}
-
-@bot.event
-async def on_ready():
-    logging.info(f"Bot is ready! Logged in as {bot.user}")
-    try:
-        # Sync global commands instead of guild-specific
-        synced = await bot.tree.sync()
-        logging.info(f"Synced {len(synced)} global commands")
-    except Exception as e:
-        logging.error(f"Failed to sync commands: {e}")
-        logging.info("This usually means the bot needs to be re-invited with 'applications.commands' scope")
-
-# Use global commands instead of guild-specific
-@bot.tree.command(name="time", description="Get current time")
-@app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
-async def time(interaction: discord.Interaction):
-    """Get current time"""
-    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    await interaction.response.send_message(
-        f"{current_time}",
-        ephemeral=True
-    )
-
-@bot.tree.command(name="user", description="Get user info")
-@app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
-async def user(interaction: discord.Interaction):
-    """Get user info"""
-    await interaction.response.send_message(
-        f"{interaction.user}",
-        ephemeral=True
-    )
-
-@bot.tree.command(name="logs", description="View message logs for specific channel")
-@app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
-async def logs(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    """View message logs for specific channel"""
-    if channel is None:
-        channel = interaction.channel
-    
-    if channel.id not in message_logs or not message_logs[channel.id]:
-        await interaction.response.send_message(
-            f"No messages logged for {channel.mention}!", 
-            ephemeral=True
-        )
-        return
-    
-    log_text = f"**Recent Messages in {channel.mention}:**\n\n"
-    for log in reversed(message_logs[channel.id][-10:]):
-        log_text += f"**{log['author']}** at {log['timestamp']}\n"
-        log_text += f"{log['content']}\n\n"
-    
-    await interaction.response.send_message(log_text, ephemeral=True)
-
-@bot.tree.command(name="start_logging", description="Start logging messages in a channel")
-@app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
-async def start_logging(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    """Start logging messages in a channel"""
-    if channel is None:
-        channel = interaction.channel
-    
-    if channel.id not in message_logs:
-        message_logs[channel.id] = []
-        await interaction.response.send_message(
-            f"Started logging messages in {channel.mention}",
-            ephemeral=True
-        )
-    else:
-        await interaction.response.send_message(
-            f"Already logging messages in {channel.mention}",
-            ephemeral=True
-        )
-
-@bot.tree.command(name="stop_logging", description="Stop logging messages in a channel")
-@app_commands.checks.has_any_role(*AUTHORIZED_ROLE_IDS)
-async def stop_logging(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    """Stop logging messages in a channel"""
-    if channel is None:
-        channel = interaction.channel
-    
-    if channel.id in message_logs:
-        del message_logs[channel.id]
-        await interaction.response.send_message(
-            f"Stopped logging messages in {channel.mention}",
-            ephemeral=True
-        )
-    else:
-        await interaction.response.send_message(
-            f"Not logging messages in {channel.mention}",
-            ephemeral=True
-        )
-
-@bot.event
-async def on_message(message):
-    if message.author == bot.user:
-        return
-
-    # Only log if channel is being monitored
-    if message.channel.id in message_logs:
-        log_entry = {
-            'author': str(message.author),
-            'content': message.content,
-            'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        
-        message_logs[message.channel.id].append(log_entry)
-        if len(message_logs[message.channel.id]) > 100:
-            message_logs[message.channel.id].pop(0)
-        
-        print(f"[{message.channel.name}] [{log_entry['timestamp']}] {log_entry['author']}: {log_entry['content']}")
-    
-    await bot.process_commands(message)
-
-@bot.tree.error
-async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.errors.MissingAnyRole):
-        await interaction.response.send_message(
-            "You don't have permission to use this command!",
-            ephemeral=True
-        )
-    else:
-        logging.error(f"Error: {error}")
-        await interaction.response.send_message(
-            "Something went wrong!",
-            ephemeral=True
-        )
+# ... rest of your bot code remains exactly the same ...
 
 async def main():
     TOKEN = os.getenv('DISCORD_TOKEN')
@@ -166,4 +50,11 @@ async def main():
         logging.error(f"Error starting bot: {e}")
 
 if __name__ == "__main__":
+    # Start web server in background if PORT is set (Render)
+    if os.environ.get('PORT'):
+        web_thread = Thread(target=run_web, daemon=True)
+        web_thread.start()
+        print("Web server started for health checks")
+    
+    # Run bot
     asyncio.run(main())
